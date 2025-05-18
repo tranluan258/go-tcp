@@ -2,9 +2,14 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
+	"os/signal"
+	"sync"
+	"time"
 )
 
 type client struct {
@@ -26,25 +31,50 @@ func New() *sever {
 func (s *sever) Run() {
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", s.host, s.port))
 	if err != nil {
-		os.Exit(100)
+		log.Fatal("Error starting server: ", err)
 	}
 
 	fmt.Printf("Server started on %s:%s\n", s.host, s.port)
 
-	defer listener.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
 
+	var wg sync.WaitGroup
 	for {
-		conn, _ := listener.Accept()
-		fmt.Printf("New connection from %s", conn.RemoteAddr().String())
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				fmt.Println("Server shutting down.")
+				break
+			}
+			continue
+		}
+
+		fmt.Printf("New connection from %s \n", conn.RemoteAddr().String())
+
 		client := &client{
 			conn: conn,
 		}
-		go client.handleRequest()
+
+		wg.Add(1)
+		go client.handleRequest(&wg, ctx)
 	}
+
+	wg.Wait()
+	fmt.Println("Server stopped.")
 }
 
-func (client *client) handleRequest() {
+func (client *client) handleRequest(wg *sync.WaitGroup, ctx context.Context) {
+	defer wg.Done()
+	defer client.conn.Close()
+
 	reader := bufio.NewReader(client.conn)
+
+	_ = client.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
 	for {
 		msg, err := reader.ReadString('\n')
@@ -52,6 +82,14 @@ func (client *client) handleRequest() {
 			client.conn.Close()
 			return
 		}
+
+		select {
+		case <-ctx.Done():
+			fmt.Println("Server shutting down, closing connection.")
+			return
+		default:
+		}
+
 		fmt.Printf("Incoming message: %s", string(msg))
 
 		client.conn.Write([]byte("Message received.\n"))
